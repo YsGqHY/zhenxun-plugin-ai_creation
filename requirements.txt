@@ -1,2 +1,4 @@
 playwright-stealth
 tomli_w
+openai
+google-genai

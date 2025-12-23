@@ -6,6 +6,9 @@
 
 *基于 `zhenxun_bot` 实现文生图 / 图生图能力，支持多引擎、模板和提示词工程*
 
+> 💡 **项目说明**：本仓库基于 [webjoin111/zhenxun-plugin-ai_creation](https://github.com/webjoin111/zhenxun-plugin-ai_creation) 进行深度更新。
+> 核心改动：**取消依赖真寻 LLM 接口**，重构为使用 `openai` SDK 及 `httpx` 直接请求。新增 **Gemini 原生 API 支持**，支持 **4K 超清分辨率** 生成。
+
 ---
 
 </div>
@@ -58,15 +61,23 @@
 </td>
 <td width="50%">
 
+### ☁️ 云端存储
+- 支持对接 Alist / OpenList
+- 生成图片自动上传图床
+- 自动保存详细 Prompt 日志
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
 ### 🖼️ 完备图生图
 - 引用图片、附带图片
 - `@用户` 头像渲染
 - 多图输入支持
 
 </td>
-</tr>
-<tr>
-<td colspan="2">
+<td width="50%">
 
 ### 🛡️ 稳定运行
 - 任务队列 + 冷却控制，保障高并发下的可用性
@@ -185,13 +196,65 @@ DOUBAO_COOKIES:
 
 ## 🔌 API 绘图配置
 
-使用命令 `draw -e api ...` 即可切换到 **API 引擎**。
+使用命令 `draw -e api ...` 即可切换到 **API 引擎**。插件支持 **OpenAI 兼容协议** 和 **Gemini 原生 REST API** 两种模式。
 
-> [!NOTE]
-> **推荐配置**
-> - 🎯 推荐模型：`Gemini/gemini-2.5-flash-image-preview`
-> - 💰 成本控制：可使用第三方中转服务
-> - 🔐 需配置：`API Base URL` + `API Key`
+### 核心配置
+
+| 配置项 | 说明 | 示例 / 默认值 |
+| :--- | :--- | :--- |
+| `api_base_url` | API 基础地址 | `https://api.openai.com/v1` |
+| `api_key` | API 密钥 | `sk-xxxxxxxx` |
+| `api_draw_model` | 模型名称 | `dall-e-3` / `gemini-2.0-flash` |
+| `use_gemini_native_api` | 是否使用 Gemini 原生 REST | `False` (默认兼容模式) |
+
+### Gemini 专属配置
+
+当使用 Gemini 系列模型时，支持更多高级参数：
+
+| 配置项 | 说明 | 可选值 |
+| :--- | :--- | :--- |
+| `api_image_size` | 生成图片分辨率 | `1K`, `2K`, `4K` |
+| `api_draw_aspect_ratio` | 图片宽高比 | `16:9`, `1:1`, `3:4` 等 |
+
+> [!TIP]
+> **关于 Gemini 原生模式**
+> - 开启 `use_gemini_native_api: True` 后，将直接调用 Google 的 REST API。
+> - 支持直连官方接口或使用兼容的中转服务（需在 `api_base_url` 配置中转地址）。
+> - 自动支持分辨率和宽高比参数。
+
+---
+
+## ☁️ 云端存储配置 (Alist)
+
+支持将生成的图片和 Prompt 日志自动上传到 Alist (OpenList) 服务器，并返回预览链接。
+
+### 配置步骤
+
+1. **部署 Alist / OpenList**  
+   确保你有一个运行中的 Alist 或 OpenList 服务。
+
+2. **获取 Token**  
+   在 Alist 后台 -> 设置 -> 其他 -> 令牌 中获取 API Token。
+
+3. **修改配置**  
+   在 `data/config.yaml` 中添加或修改以下配置：
+
+```yaml
+# 开启上传功能
+enable_openlist_upload: true
+
+# 服务器地址
+openlist_host: "http://your-alist-site.com"
+
+# API Token
+openlist_token: "alist-token-xxxxxx"
+
+# 图片上传路径
+openlist_upload_path: "/ai_images"
+
+# 日志上传路径
+openlist_prompt_log_path: "/ai_prompts"
+```
 
 ---
 
@@ -440,7 +503,21 @@ draw [附带图片] -o on 换成赛博朋克风格
 | :--- | :---: | :--- |
 | `default_draw_engine` | `"doubao"` | 默认绘图引擎：`doubao` / `api` |
 | `enable_api_draw_engine` | `True` | 是否允许非管理员使用 API 引擎 |
-| `api_draw_model` | `"Gemini/gemini-2.5-flash-image-preview"` | API 引擎使用的模型 |
+| `api_base_url` | `""` | API 基础 URL |
+| `api_key` | `""` | API 密钥 |
+| `api_draw_model` | `"gemini..."` | 绘图模型名称 |
+| `use_gemini_native_api` | `False` | 是否使用 Gemini 原生 REST API |
+| `api_image_size` | `"1K"` | Gemini 图片分辨率 (1K/2K/4K) |
+| `api_draw_aspect_ratio` | `""` | 图片宽高比 (如 16:9) |
+
+### ☁️ 云端存储配置
+
+| 配置项 | 默认值 | 说明 |
+| :--- | :---: | :--- |
+| `enable_openlist_upload` | `False` | 是否启用 Alist 图片上传 |
+| `openlist_host` | `""` | Alist 服务器地址 |
+| `openlist_token` | `""` | Alist API Token |
+| `openlist_upload_path` | `"/ai_images"` | 图片上传路径 |
 
 ### 🤖 验证码处理配置
 

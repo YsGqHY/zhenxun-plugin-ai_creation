@@ -25,7 +25,7 @@ def get_engine(engine_name: str) -> DrawEngine:
 
         return DoubaoEngine()
     if normalized_name == "api":
-        from .llm_api import LlmApiEngine
+        from .llm_image_api import LlmImageApiEngine
 
-        return LlmApiEngine()
+        return LlmImageApiEngine()
     raise ValueError(f"未知的绘图引擎: '{engine_name}'")

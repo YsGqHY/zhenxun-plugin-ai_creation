@@ -33,7 +33,7 @@ from zhenxun.utils.time_utils import TimeUtils
 
 from ..config import SYSTEM_PROMPT_FUSION, SYSTEM_PROMPT_OPTIMIZE, base_config
 from ..engines import DrawEngine, get_engine
-from ..engines.llm_api import LlmApiEngine
+from ..engines.llm_image_api import LlmImageApiEngine
 from ..templates import template_manager
 
 
@@ -457,12 +457,12 @@ class DrawingService:
         self.limiter.start_cd(self.ctx.user_id)
 
     async def _send_processing_message(self):
-        """依据引擎类型发送“处理中”提示"""
+        """依据引擎类型发送"处理中"提示"""
         engine = self.ctx.engine
         if engine is None:
             await self.ctx.matcher.finish("❌ 绘图引擎初始化失败。")
 
-        if isinstance(engine, LlmApiEngine):
+        if isinstance(engine, LlmImageApiEngine):
             message_to_send = "\n".join(
                 [*self.ctx.initial_message_parts, "🎨 正在生成图片，请稍候..."]
             )
@@ -507,6 +507,9 @@ class DrawingService:
             )
             self.ctx.draw_result = draw_result
 
+            # 在发送到QQ之前打印生成结果信息
+            self._log_generation_result(draw_result)
+
         except Exception as e:
             logger.error(
                 f"绘图引擎 '{self.ctx.engine_name}' 执行失败: {e}",
@@ -514,6 +517,39 @@ class DrawingService:
             )
             friendly_message = get_user_friendly_error_message(e)
             await self.ctx.matcher.finish(f"❌ 图片生成失败: {friendly_message}")
+
+    def _log_generation_result(self, result: dict[str, Any] | list[dict[str, Any]]):
+        """在发送到QQ之前打印生成结果信息到控制台"""
+        print("\n" + "=" * 60)
+        print("[DrawingService] 图片生成完成，准备发送到QQ")
+        print("=" * 60)
+        print(f"用户ID: {self.ctx.user_id}")
+        print(f"引擎: {self.ctx.engine_name}")
+        print(f"提示词: {self.ctx.final_prompt[:100]}{'...' if len(self.ctx.final_prompt) > 100 else ''}")
+        print(f"输入图片数量: {len(self.ctx.image_bytes_list)}")
+
+        if isinstance(result, dict):
+            images = result.get("images", [])
+            text = result.get("text", "")
+            print(f"生成图片数量: {len(images)}")
+            for i, img in enumerate(images):
+                print(f"  图片{i + 1}: {len(img) / 1024:.1f} KB")
+            if text:
+                print(f"返回文本: {text[:200]}{'...' if len(text) > 200 else ''}")
+        elif isinstance(result, list):
+            image_count = 0
+            text_parts = []
+            for block in result:
+                if block.get("type") == "image" and block.get("content"):
+                    image_count += len(block["content"])
+                elif block.get("type") == "text" and block.get("content"):
+                    text_parts.append(str(block["content"]))
+            print(f"生成图片数量: {image_count}")
+            if text_parts:
+                combined_text = "\n".join(text_parts)
+                print(f"返回文本: {combined_text[:200]}{'...' if len(combined_text) > 200 else ''}")
+
+        print("=" * 60 + "\n")
 
     async def _send_response(self):
         """整理绘图结果并向用户发送回复"""
@@ -545,6 +581,14 @@ class DrawingService:
         if not images_bytes and not text_content:
             await self.ctx.matcher.finish("❌ 生成失败：模型未返回任何内容。")
 
+        # 上传图片到 Alist 并获取 URL
+        image_urls: list[str] = []
+        if images_bytes:
+            image_urls = await self._upload_images_to_alist(images_bytes)
+            # 同步上传提示词日志
+            if image_urls:
+                await self._upload_prompt_log_to_alist(text_content)
+
         if not images_bytes and text_content:
             reply_message = Message(
                 [
@@ -560,16 +604,133 @@ class DrawingService:
             if text_content:
                 message_to_send.append(MessageSegment.text(f"📝 {text_content}\n"))
             message_to_send.append(MessageSegment.image(file=images_bytes[0]))
+            # 如果有 URL，附加到消息中
+            if image_urls:
+                message_to_send.append(
+                    MessageSegment.text(f"\n🔗 在线查看: {image_urls[0]}")
+                )
             await self.ctx.matcher.finish(Message(message_to_send))
             return
 
         if len(images_bytes) > 1:
+            # 如果有上传的 URL，添加到 structured_blocks 中
+            if image_urls:
+                urls_text = "\n".join(
+                    [f"图片{i + 1}: {url}" for i, url in enumerate(image_urls)]
+                )
+                structured_blocks.append(
+                    {"type": "text", "content": f"🔗 在线查看:\n{urls_text}"}
+                )
+
             success = await send_images_as_forward(
                 self.ctx.bot, self.ctx.event, structured_blocks
             )
             if not success:
                 logger.warning("合并转发失败")
             await self.ctx.matcher.finish()
+
+    async def _upload_images_to_alist(
+        self, images_bytes: list[bytes]
+    ) -> list[str]:
+        """上传图片到 OpenList 并返回预览 URL 列表"""
+        from ..config import base_config
+        from .alist_uploader import get_uploader
+
+        if not base_config.get("enable_openlist_upload"):
+            return []
+
+        uploader = get_uploader()
+        if not uploader:
+            logger.debug("[OpenList] 上传器未初始化，跳过上传")
+            return []
+
+        try:
+            results = await uploader.upload_images(images_bytes)
+            if results:
+                logger.info(f"[OpenList] 成功上传 {len(results)} 张图片")
+                # 返回预览 URL（用于网页显示）
+                return [r.preview_url for r in results]
+            return []
+        except Exception as e:
+            logger.error(f"[OpenList] 上传图片失败: {e}")
+            return []
+
+    def _build_prompt_log(self, api_response_text: str) -> str:
+        """
+        构建包含完整元信息的提示词日志内容
+
+        Args:
+            api_response_text: API返回的文本内容
+
+        Returns:
+            格式化的日志文本
+        """
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_id = self.ctx.user_id
+        # 隐私处理：保留前2位和后2位，中间用***替换
+        if len(user_id) > 4:
+            masked_user_id = f"{user_id[:2]}***{user_id[-2:]}"
+        else:
+            masked_user_id = "***"
+        engine_name = self.ctx.engine_name
+        template_name = "无" if not self.ctx.template_prompt else "已使用模板"
+        user_input = self.ctx.user_prompt or "(无文本输入)"
+        final_prompt = self.ctx.final_prompt
+        image_count = len(self.ctx.image_bytes_list)
+
+        log_content = f"""================== AI绘图记录 ==================
+时间: {timestamp}
+用户ID: {masked_user_id}
+引擎: {engine_name}
+模板: {template_name}
+输入图片数量: {image_count}
+
+【原始输入】
+{user_input}
+
+【最终提示词】
+{final_prompt}
+
+【API返回文本】
+{api_response_text if api_response_text else "(无文本返回)"}
+==============================================="""
+        return log_content
+
+    async def _upload_prompt_log_to_alist(self, api_response_text: str) -> str | None:
+        """
+        构建并上传提示词日志到 OpenList
+
+        Args:
+            api_response_text: API返回的文本内容
+
+        Returns:
+            成功返回预览URL，失败返回None
+        """
+        from ..config import base_config
+        from .alist_uploader import get_uploader
+
+        if not base_config.get("enable_openlist_upload"):
+            return None
+
+        uploader = get_uploader()
+        if not uploader:
+            logger.debug("[OpenList] 上传器未初始化，跳过日志上传")
+            return None
+
+        log_path = base_config.get("openlist_prompt_log_path", "/ai_prompts")
+
+        try:
+            log_content = self._build_prompt_log(api_response_text)
+            result = await uploader.upload_text(log_content, log_path)
+            if result:
+                logger.info(f"[OpenList] 提示词日志上传成功: {result.path}")
+                return result.preview_url
+            return None
+        except Exception as e:
+            logger.error(f"[OpenList] 提示词日志上传失败: {e}")
+            return None
 
 
 __all__ = [

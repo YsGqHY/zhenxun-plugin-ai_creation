@@ -22,7 +22,7 @@ from zhenxun.utils.limiters import FreqLimiter
 
 from .config import base_config
 
-draw_limiter = FreqLimiter(base_config.get("draw_cd", 120))
+draw_limiter = FreqLimiter(float(base_config.get("draw_cd", 120)))
 
 __plugin_meta__ = PluginMetadata(
     name="AI创作",
@@ -113,9 +113,39 @@ draw [附带图片] -o on 换成赛博朋克风格
             ),
             RegisterConfig(
                 module="ai_creation",
+                key="api_base_url",
+                value="",
+                help="OpenAI 兼容 API 的基础 URL，如 https://api.openai.com 或中转服务地址",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="api_key",
+                value="",
+                help="OpenAI 兼容 API 的密钥",
+            ),
+            RegisterConfig(
+                module="ai_creation",
                 key="api_draw_model",
-                value="Gemini/gemini-2.5-flash-image-preview",
-                help="使用API绘图时调用的模型名称，格式：提供商/模型名",
+                value="gemini-2.0-flash-preview-image-generation",
+                help="绘图模型名称。包含'gemini'时自动使用Google genai SDK，否则使用OpenAI兼容API",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="api_draw_aspect_ratio",
+                value="",
+                help="绘图输出的宽高比，留空使用模型默认值。Gemini支持: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="api_image_size",
+                value="1K",
+                help="Gemini绘图输出分辨率。可选: 1K, 2K, 4K（必须大写）。仅Gemini模型有效",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="use_gemini_native_api",
+                value=False,
+                help="是否使用 Gemini 原生 REST API。开启后使用官方 API 格式（支持直连或兼容的中转服务），关闭则使用 OpenAI 兼容格式调用",
             ),
             RegisterConfig(
                 module="ai_creation",
@@ -170,6 +200,36 @@ draw [附带图片] -o on 换成赛博朋克风格
                 key="browser_idle_timeout_minutes",
                 value=0,
                 help="浏览器在没有绘图任务时，闲置多少分钟后自动关闭。设置为 0 则禁用此功能。",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="openlist_host",
+                value="",
+                help="OpenList 服务器地址，如 http://127.0.0.1:49447。留空则不上传图片到云端。",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="openlist_token",
+                value="",
+                help="OpenList API Token。获取方式：OpenList 后台 -> 设置 -> 其他 -> 令牌",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="openlist_upload_path",
+                value="/ai_images",
+                help="OpenList 图片上传目录路径，如 /ai_images",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="enable_openlist_upload",
+                value=False,
+                help="是否启用 OpenList 图片上传功能。开启后，生成的图片会上传并返回访问链接。",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="openlist_prompt_log_path",
+                value="/ai_prompts",
+                help="OpenList 提示词日志上传目录路径，用于保存绘图提示词和API返回结果",
             ),
         ],
     ).dict(),
@@ -311,13 +371,29 @@ async def _():
     from . import templates
 
     try:
-        cooldown = base_config.get("browser_cooldown_seconds")
+        cooldown = float(base_config.get("browser_cooldown_seconds", 15))
         draw_queue_manager.set_browser_cooldown(cooldown)
         await cookie_manager.load_and_sync_cookies()
         draw_queue_manager.start_idle_monitor()
         draw_queue_manager.start_queue_processor()
         await templates.template_manager.initialize()
         logger.debug(f"AI Draw 插件核心服务已启动, 浏览器冷却时间: {cooldown}s")
+
+        # 初始化 OpenList 上传器
+        if base_config.get("enable_openlist_upload"):
+            from .services.alist_uploader import init_uploader
+
+            host = base_config.get("openlist_host", "")
+            token = base_config.get("openlist_token", "")
+            if host and token:
+                init_uploader(
+                    host=host,
+                    token=token,
+                    upload_path=base_config.get("openlist_upload_path", "/ai_images"),
+                )
+                logger.info(f"[OpenList] 上传服务已启用: {host}")
+            else:
+                logger.warning("[OpenList] 上传已启用，但服务器地址或 Token 为空，上传功能将不可用")
     except Exception as e:
         logger.error(f"AI Draw 插件初始化失败: {e}")
 
