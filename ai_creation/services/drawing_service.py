@@ -152,6 +152,16 @@ async def resolve_template_name_by_input(
     return user_input
 
 
+def _build_fallback_prompt(
+    original_prompt: str, template_prompt: str | None
+) -> str:
+    if template_prompt and original_prompt:
+        return f"{original_prompt}。\n请遵循以下风格和要求：{template_prompt}"
+    if template_prompt:
+        return template_prompt
+    return original_prompt
+
+
 async def _optimize_draw_prompt(
     user_message: UniMessage, user_id: str, template_prompt: str | None = None
 ) -> str:
@@ -162,6 +172,7 @@ async def _optimize_draw_prompt(
     logger.debug(f"🎨 启用绘图描述优化，为用户 '{user_id}' 的描述进行润色...")
 
     original_prompt = user_message.extract_plain_text().strip()
+    fallback_prompt = _build_fallback_prompt(original_prompt, template_prompt)
 
     try:
         logger.debug(
@@ -209,7 +220,7 @@ async def _optimize_draw_prompt(
         json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
         if not json_match:
             logger.warning("描述优化LLM未返回有效的JSON结构，将使用原始描述。")
-            return original_prompt
+            return fallback_prompt
 
         parsed_json = json.loads(json_match.group())
 
@@ -219,11 +230,11 @@ async def _optimize_draw_prompt(
             logger.info(f"✅ 描述优化成功。优化后: '{optimized}'")
             return optimized
         logger.warning("描述优化LLM返回内容不符合预期，将使用原始描述。")
-        return original_prompt
+        return fallback_prompt
 
     except Exception as e:
         logger.error(f"❌ 绘图描述优化失败，将使用原始描述。错误: {e}")
-        return original_prompt
+        return fallback_prompt
 
 
 class DrawingContext(BaseModel):
@@ -385,6 +396,22 @@ class DrawingService:
                 initial_message_parts.append(
                     f"🎨 正在使用模板 '{resolved_template_name}' 进行绘图..."
                 )
+        elif user_prompt and self.ctx.image_bytes_list:
+            candidate_name = user_prompt.strip()
+            candidate_prompt = template_manager.get_prompt(candidate_name)
+            if candidate_prompt:
+                template_prompt = candidate_prompt
+                user_prompt = ""
+                initial_message_parts.append(
+                    f"🎨 正在使用模板 '{candidate_name}' 进行绘图..."
+                )
+                # 移除文本提示词，只保留图片作为输入，避免模板名干扰优化
+                non_text_parts = [
+                    seg
+                    for seg in self.ctx.user_intent_message
+                    if not isinstance(seg, str)
+                ]
+                self.ctx.user_intent_message = UniMessage(non_text_parts)
 
         if not user_prompt and not template_prompt and not self.ctx.image_bytes_list:
             await matcher.finish("请提供图片描述或附带图片，例如：draw 一只可爱的小猫")
