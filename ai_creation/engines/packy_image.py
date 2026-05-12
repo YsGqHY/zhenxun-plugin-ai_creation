@@ -67,7 +67,7 @@ def _is_retryable_status(status_code: int) -> bool:
 
 
 def _build_packy_edit_multipart(
-    payload: dict[str, Any], image_data: bytes
+    payload: dict[str, Any], images_data: list[bytes]
 ) -> tuple[bytes, str]:
     boundary = f"packy-edit-{uuid.uuid4().hex}"
     body = bytearray()
@@ -82,18 +82,21 @@ def _build_packy_edit_multipart(
         body.extend(str(value).encode("utf-8"))
         body.extend(b"\r\n")
 
-    mime_type = _detect_image_mime(image_data)
-    ext = _mime_to_ext(mime_type)
-    body.extend(f"--{boundary}\r\n".encode("ascii"))
-    body.extend(
-        (
-            "Content-Disposition: form-data; "
-            f'name="{PACKY_EDIT_IMAGE_FIELD_NAME}"; filename="input.{ext}"\r\n'
-        ).encode("utf-8")
-    )
-    body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"))
-    body.extend(image_data)
-    body.extend(b"\r\n")
+    for index, image_data in enumerate(images_data, start=1):
+        mime_type = _detect_image_mime(image_data)
+        ext = _mime_to_ext(mime_type)
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(
+            (
+                "Content-Disposition: form-data; "
+                f'name="{PACKY_EDIT_IMAGE_FIELD_NAME}"; '
+                f'filename="input-{index}.{ext}"\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"))
+        body.extend(image_data)
+        body.extend(b"\r\n")
+
     body.extend(f"--{boundary}--\r\n".encode("ascii"))
     return bytes(body), boundary
 
@@ -372,13 +375,16 @@ class PackyImageEngine(DrawEngine):
             **packy_options,
         }
 
-        input_image = None
+        input_images: list[bytes] = []
         if has_input_images:
-            input_image = next((img for img in image_bytes or [] if img), None)
-            if not input_image:
+            input_images = [img for img in image_bytes or [] if img]
+            if not input_images:
                 raise ValueError("Packy 图生图模式未收到有效图片数据")
-            if image_bytes and len(image_bytes) > 1:
-                logger.warning("[Packy] 官方建议 edits 一次只上传 1 张图片，已使用第一张有效图片")
+            if len(input_images) > 1:
+                logger.warning(
+                    f"[Packy] 官方建议 edits 一次只上传 1 张图片，"
+                    f"当前将测试上传 {len(input_images)} 张图片"
+                )
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -400,10 +406,10 @@ class PackyImageEngine(DrawEngine):
                     timeout=REQUEST_TIMEOUT, proxy=None
                 ) as client:
                     if has_input_images:
-                        if input_image is None:
+                        if not input_images:
                             raise ValueError("Packy 图生图模式未收到有效图片数据")
                         multipart_body, boundary = _build_packy_edit_multipart(
-                            payload, input_image
+                            payload, input_images
                         )
                         resp = await client.post(
                             url,
