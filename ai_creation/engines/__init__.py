@@ -28,4 +28,8 @@ def get_engine(engine_name: str) -> DrawEngine:
         from .llm_image_api import LlmImageApiEngine
 
         return LlmImageApiEngine()
+    if normalized_name == "packy":
+        from .packy_image import PackyImageEngine
+
+        return PackyImageEngine()
     raise ValueError(f"未知的绘图引擎: '{engine_name}'")

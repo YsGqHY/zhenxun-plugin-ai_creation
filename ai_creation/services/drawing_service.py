@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from io import BytesIO
@@ -34,7 +35,104 @@ from zhenxun.utils.time_utils import TimeUtils
 from ..config import SYSTEM_PROMPT_FUSION, SYSTEM_PROMPT_OPTIMIZE, base_config
 from ..engines import DrawEngine, get_engine
 from ..engines.llm_image_api import LlmImageApiEngine
+from ..engines.packy_image import (
+    PackyImageEngine,
+    normalize_packy_api_options,
+    normalize_packy_size,
+)
 from ..templates import template_manager
+
+
+def _parse_error_payload(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        return payload
+    if not isinstance(payload, str):
+        return None
+
+    payload = payload.strip()
+    if not payload:
+        return None
+
+    try:
+        parsed = json.loads(payload)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    try:
+        parsed = ast.literal_eval(payload)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return None
+
+
+def _extract_http_request_error(error: Exception) -> str | None:
+    error_text = str(error)
+
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_match = re.search(r"Error code:\s*(\d{3})", error_text)
+        if status_match:
+            status_code = status_match.group(1)
+        else:
+            status_match = re.search(r"\b(\d{3})\s+[A-Za-z][A-Za-z\s-]*", error_text)
+            if status_match:
+                status_code = status_match.group(1)
+
+    payload = _parse_error_payload(getattr(error, "body", None))
+    if payload is None and " - " in error_text:
+        payload = _parse_error_payload(error_text.split(" - ", 1)[1])
+    if payload is None and "{" in error_text and "}" in error_text:
+        payload = _parse_error_payload(
+            error_text[error_text.find("{") : error_text.rfind("}") + 1]
+        )
+
+    error_info = payload
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        error_info = payload["error"]
+
+    upstream_message = None
+    upstream_code = None
+    if isinstance(error_info, dict):
+        message = error_info.get("message") or error_info.get("detail")
+        code = error_info.get("code") or error_info.get("type")
+        if isinstance(message, str) and message.strip():
+            upstream_message = message.strip()
+        if isinstance(code, str) and code.strip():
+            upstream_code = code.strip()
+
+    if not upstream_message:
+        for pattern in (r"'message':\s*'([^']+)'", r'"message":\s*"([^"]+)"'):
+            match = re.search(pattern, error_text)
+            if match:
+                upstream_message = match.group(1).strip()
+                break
+
+    status_text = f"HTTP {status_code}" if status_code else ""
+    detail_text = upstream_message or ""
+
+    if upstream_code:
+        if detail_text:
+            detail_text = f"{detail_text} ({upstream_code})"
+        else:
+            detail_text = f"错误码: {upstream_code}"
+
+    if status_text and detail_text:
+        return f"{status_text}：{detail_text}"
+    return status_text or detail_text or None
+
+
+def _format_user_error_reply(prefix: str, error: Exception) -> str:
+    friendly_message = get_user_friendly_error_message(error)
+    http_error = _extract_http_request_error(error)
+
+    if not http_error or http_error in friendly_message:
+        return f"{prefix}: {friendly_message}"
+    return f"{prefix}: {friendly_message}\nHTTP 请求错误：{http_error}"
 
 
 async def send_images_as_forward(
@@ -257,11 +355,70 @@ class DrawingContext(BaseModel):
     template_prompt: str | None = None
     final_prompt: str = ""
     engine_name: str = ""
+    draw_size: str | None = None
+    packy_options: dict[str, Any] = Field(default_factory=dict)
     engine: DrawEngine | None = Field(None, exclude=True)
     draw_result: dict[str, Any] | list[dict[str, Any]] | None = None
 
     class Config:
         arbitrary_types_allowed = True
+
+
+PACKY_COMMAND_OPTION_SPECS = {
+    "quality": ("quality", "packy_quality"),
+    "format": ("output_format", "packy_output_format"),
+    "response-format": ("response_format", "packy_response_format"),
+    "n": ("n", "packy_n"),
+    "background": ("background", "packy_background"),
+    "moderation": ("moderation", "packy_moderation"),
+    "input-fidelity": ("input_fidelity", "packy_input_fidelity"),
+    "compression": ("output_compression", "packy_output_compression"),
+    "user": ("user", "packy_user"),
+}
+
+
+def _collect_packy_command_options(options: dict[str, Any]) -> dict[str, Any]:
+    packy_options: dict[str, Any] = {}
+    for option_name, (api_key, arg_key) in PACKY_COMMAND_OPTION_SPECS.items():
+        option = options.get(option_name)
+        if not option:
+            continue
+        value = option.args.get(arg_key)
+        if value is None or str(value).strip() == "":
+            continue
+        packy_options[api_key] = value
+    return packy_options
+
+
+def _resolve_requested_engine_name(options: dict[str, Any]) -> str:
+    engine_option = options.get("engine")
+    engine_name = (
+        engine_option.args.get("engine_name") if engine_option else None
+    ) or base_config.get("default_draw_engine")
+    return str(engine_name or "").lower()
+
+
+def _build_missing_prompt_message(engine_name: str) -> str:
+    common = "请提供图片描述或附带图片，例如：draw 一只可爱的小猫"
+    if engine_name == "packy":
+        return (
+            f"{common}\n"
+            "Packy 参数示例：draw --engine packy -size 2560:1440 -background opaque -quality high -format png 未来都市\n"
+            "可用 Packy 参数：-size <WxH|auto>，-background auto|opaque，"
+            "-quality auto|low|medium|high，-format png|jpeg|webp，"
+            "-response-format url|b64_json，-n 1，-moderation auto|low，"
+            "-input-fidelity high，-compression 0-100，-user <标识>。"
+        )
+    if engine_name == "api":
+        return (
+            f"{common}\n"
+            "API 引擎参数：-o on/off 控制提示词优化，-t <模板> 使用模板；"
+            "Gemini 输出分辨率请通过配置项 api_image_size 设置为 1K/2K/4K。"
+        )
+    return (
+        f"{common}\n"
+        "通用参数：-e/--engine 选择 doubao/api/packy，-t/--template 使用模板，-o/--optimize on|off 控制提示词优化。"
+    )
 
 
 class DrawingService:
@@ -284,8 +441,7 @@ class DrawingService:
             raise
         except Exception as e:
             logger.error(f"处理绘图请求失败: {e}")
-            friendly_message = get_user_friendly_error_message(e)
-            await self.ctx.matcher.finish(f"❌ 绘图失败: {friendly_message}")
+            await self.ctx.matcher.finish(_format_user_error_reply("❌ 绘图失败", e))
 
     async def _prepare_input(self):
         """准备并解析用户输入（文本、图片、@、引用消息）"""
@@ -414,7 +570,8 @@ class DrawingService:
                 self.ctx.user_intent_message = UniMessage(non_text_parts)
 
         if not user_prompt and not template_prompt and not self.ctx.image_bytes_list:
-            await matcher.finish("请提供图片描述或附带图片，例如：draw 一只可爱的小猫")
+            engine_name_for_help = _resolve_requested_engine_name(options)
+            await matcher.finish(_build_missing_prompt_message(engine_name_for_help))
 
         should_optimize = base_config.get("enable_draw_prompt_optimization")
         if optimize_option := options.get("optimize"):
@@ -448,6 +605,27 @@ class DrawingService:
         if not engine_name:
             await matcher.finish("❌ 错误：未配置默认绘图引擎，请联系管理员。")
 
+        size_option = options.get("size")
+        draw_size = None
+        packy_command_options = _collect_packy_command_options(options)
+        if size_option:
+            raw_size = str(size_option.args.get("draw_size", "")).strip()
+            if engine_name.lower() != "packy":
+                await matcher.finish("❌ -size 分辨率参数仅支持 Packy 引擎。")
+            try:
+                draw_size = normalize_packy_size(raw_size)
+            except ValueError as e:
+                await matcher.finish(f"❌ {e}")
+
+        packy_options: dict[str, Any] = {}
+        if packy_command_options:
+            if engine_name.lower() != "packy":
+                await matcher.finish("❌ Packy API 参数仅支持 Packy 引擎。")
+            try:
+                packy_options = normalize_packy_api_options(packy_command_options)
+            except ValueError as e:
+                await matcher.finish(f"❌ {e}")
+
         if (
             engine_name.lower() == "api"
             and not self.ctx.is_superuser
@@ -457,6 +635,14 @@ class DrawingService:
                 "❌ API绘图模式当前已禁用，请直接使用 draw [描述] 尝试默认绘图引擎。"
             )
 
+        if (
+            engine_name.lower() == "packy"
+            and not base_config.get("enable_packy_gpt_image")
+        ):
+            await matcher.finish(
+                "❌ Packy GPT-Image-2 引擎未启用，请在配置中开启 enable_packy_gpt_image。"
+            )
+
         engine = get_engine(engine_name)
 
         self.ctx.initial_message_parts = initial_message_parts
@@ -464,6 +650,8 @@ class DrawingService:
         self.ctx.template_prompt = template_prompt
         self.ctx.final_prompt = final_prompt
         self.ctx.engine_name = engine_name
+        self.ctx.draw_size = draw_size
+        self.ctx.packy_options = packy_options
         self.ctx.engine = engine
 
         logger.info(f"用户 {self.ctx.user_id} 请求AI绘图, 使用引擎: {engine_name}")
@@ -489,7 +677,7 @@ class DrawingService:
         if engine is None:
             await self.ctx.matcher.finish("❌ 绘图引擎初始化失败。")
 
-        if isinstance(engine, LlmImageApiEngine):
+        if isinstance(engine, (LlmImageApiEngine, PackyImageEngine)):
             message_to_send = "\n".join(
                 [*self.ctx.initial_message_parts, "🎨 正在生成图片，请稍候..."]
             )
@@ -529,9 +717,17 @@ class DrawingService:
             await self.ctx.matcher.finish("❌ 绘图引擎实例未创建。")
 
         try:
-            draw_result = await self.ctx.engine.draw(
-                self.ctx.final_prompt, self.ctx.image_bytes_list
-            )
+            if isinstance(self.ctx.engine, PackyImageEngine):
+                draw_result = await self.ctx.engine.draw(
+                    self.ctx.final_prompt,
+                    self.ctx.image_bytes_list,
+                    size_override=self.ctx.draw_size,
+                    api_options=self.ctx.packy_options,
+                )
+            else:
+                draw_result = await self.ctx.engine.draw(
+                    self.ctx.final_prompt, self.ctx.image_bytes_list
+                )
             self.ctx.draw_result = draw_result
 
             # 在发送到QQ之前打印生成结果信息
@@ -542,8 +738,7 @@ class DrawingService:
                 f"绘图引擎 '{self.ctx.engine_name}' 执行失败: {e}",
                 e=e,
             )
-            friendly_message = get_user_friendly_error_message(e)
-            await self.ctx.matcher.finish(f"❌ 图片生成失败: {friendly_message}")
+            await self.ctx.matcher.finish(_format_user_error_reply("❌ 图片生成失败", e))
 
     def _log_generation_result(self, result: dict[str, Any] | list[dict[str, Any]]):
         """在发送到QQ之前打印生成结果信息到控制台"""

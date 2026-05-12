@@ -44,6 +44,7 @@ __plugin_meta__ = PluginMetadata(
 - **`-e, --engine <引擎>`** - 临时指定绘图引擎
     - `doubao` - 使用豆包浏览器模拟引擎
     - `api` - 使用多模态大模型 API 引擎
+    - `packy` - 使用 Packy GPT-Image-2 引擎（需开启配置）
 
 - **`-t, --template <模板>`** - 使用预设的风格模板
     - 可通过 `绘图模板 list` 查看所有可用模板
@@ -51,6 +52,22 @@ __plugin_meta__ = PluginMetadata(
 - **`-o, --optimize <模式>`** - 临时开启/关闭提示词优化
     - `on` - 开启 AI 润色，与 `-t` 合用时会智能融合描述与模板
     - `off` - 关闭 AI 润色，与 `-t` 合用时进行简单文本拼接
+
+- **Packy 专属参数**（需 `-e packy` 或默认引擎为 packy）
+    - `-size, --size <WxH|auto>` - 输出分辨率，例如 `1024x1024`、`2560:1440`、`auto`
+    - `-background, --background <值>` - 背景：`auto`、`opaque`；官方不支持 `transparent`
+    - `-quality, --quality <值>` - 质量：`auto`、`low`、`medium`、`high`
+    - `-format, --format <值>` - 输出格式：`png`、`jpeg`、`webp`；官方推荐 `png/jpeg`
+    - `-response-format, --response-format <值>` - 响应格式：`url`、`b64_json`
+    - `-n, --n <数量>` - 生成数量：官方仅支持 `1`
+    - `-moderation, --moderation <值>` - 审核强度：`auto`、`low`
+    - `-input-fidelity, --input-fidelity <值>` - 图生图保真参数：`high`
+    - `-compression, --compression <0-100>` - 输出压缩质量，主要用于 `jpeg`
+    - `-user, --user <标识>` - 传递 Packy `user` 参数
+
+- **API 引擎参数**
+    - `-o on/off`、`-t <模板>` 可用于 API 引擎
+    - Gemini 输出分辨率通过配置项 `api_image_size` 控制：`1K`、`2K`、`4K`
 
 ---
 
@@ -78,6 +95,8 @@ __plugin_meta__ = PluginMetadata(
 ```
 draw 一只可爱的猫
 draw 一只可爱的猫 -e api
+draw --engine packy -size 2560:1440 -background opaque -quality high -format png 未来都市
+draw --engine packy -input-fidelity high [附带图片] 保留主体并改成贴纸风格
 draw -t 手办 @用户
 draw -t 巨物手办 场景是夜晚 @用户
 draw [附带图片] -o on 换成赛博朋克风格
@@ -102,7 +121,7 @@ draw [附带图片] -o on 换成赛博朋克风格
                 value="doubao",
                 help=(
                     "默认使用的AI绘图引擎。可选值: 'doubao' (Playwright模拟), "
-                    "'api' (LLM原生API)。"
+                    "'api' (LLM原生API), 'packy' (Packy GPT-Image-2)。"
                 ),
             ),
             RegisterConfig(
@@ -203,6 +222,84 @@ draw [附带图片] -o on 换成赛博朋克风格
             ),
             RegisterConfig(
                 module="ai_creation",
+                key="enable_packy_gpt_image",
+                value=False,
+                help="是否启用 Packy GPT-Image-2 绘图引擎。开启后可通过 --engine packy 使用，需配置 packy_api_key。",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_api_key",
+                value="",
+                help="Packy API 的 sora 分组令牌，用于调用 GPT-Image-2 绘图接口",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_api_base_url",
+                value="https://www.packyapi.com",
+                help="Packy API 的基础 URL，默认为官方地址",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_image_size",
+                value="1024x1024",
+                help="Packy GPT-Image-2 生成图片的尺寸。支持 auto 或自定义 WxH 格式，例如 1024x1024、2560x1440；总像素需在 655360 到 8294400 之间",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_image_quality",
+                value="high",
+                help="Packy GPT-Image-2 图片质量。可选: auto, low, medium, high",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_output_format",
+                value="png",
+                help="Packy GPT-Image-2 输出格式。可选: png, jpeg, webp；官方推荐 png 或 jpeg，webp 不建议使用",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_response_format",
+                value="url",
+                help="Packy GPT-Image-2 响应格式。可选: url, b64_json；官方默认推荐 url",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_n",
+                value=1,
+                help="Packy GPT-Image-2 生成数量。官方仅支持 1",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_background",
+                value="",
+                help="Packy GPT-Image-2 背景参数。留空不传；可选: auto, opaque；官方不支持 transparent",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_moderation",
+                value="",
+                help="Packy GPT-Image-2 内容审核强度。留空不传；可选: auto, low",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_output_compression",
+                value="",
+                help="Packy GPT-Image-2 输出压缩质量。留空不传；范围: 0-100，官方建议仅在 jpeg 时使用",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_input_fidelity",
+                value="",
+                help="Packy GPT-Image-2 图生图保真参数。留空不传；编辑模式可选: high",
+            ),
+            RegisterConfig(
+                module="ai_creation",
+                key="packy_user",
+                value="",
+                help="Packy GPT-Image-2 user 参数。留空不传，用于传递终端用户标识",
+            ),
+            RegisterConfig(
+                module="ai_creation",
                 key="openlist_host",
                 value="",
                 help="OpenList 服务器地址，如 http://127.0.0.1:49447。留空则不上传图片到云端。",
@@ -240,7 +337,7 @@ draw_alconna = Alconna(
     Option(
         "--engine|-e",
         Args["engine_name", str],
-        help_text="临时指定绘图引擎 (doubao/api)",
+        help_text="临时指定绘图引擎 (doubao/api/packy)",
     ),
     Option(
         "--optimize|-o", Args["mode", str], help_text="开启或关闭提示词优化 (on/off)"
@@ -250,6 +347,56 @@ draw_alconna = Alconna(
         Args["template_name", str],
         help_text="使用一个预设的风格模板",
     ),
+    Option(
+        "--size|-size",
+        Args["draw_size", str],
+        help_text="Packy 输出分辨率，例如 2560:1440 或 2560x1440",
+    ),
+    Option(
+        "--background|-background",
+        Args["packy_background", str],
+        help_text="Packy 背景参数: auto/opaque",
+    ),
+    Option(
+        "--quality|-quality",
+        Args["packy_quality", str],
+        help_text="Packy 图片质量: auto/low/medium/high",
+    ),
+    Option(
+        "--format|--output-format|-format|-output-format",
+        Args["packy_output_format", str],
+        help_text="Packy 输出格式: png/jpeg/webp，官方推荐 png/jpeg",
+    ),
+    Option(
+        "--response-format|--response_format|-response-format|-response_format",
+        Args["packy_response_format", str],
+        help_text="Packy 响应格式: url/b64_json",
+    ),
+    Option(
+        "--n|-n",
+        Args["packy_n", int],
+        help_text="Packy 生成数量，官方仅支持 1",
+    ),
+    Option(
+        "--moderation|-moderation",
+        Args["packy_moderation", str],
+        help_text="Packy 审核强度: auto/low",
+    ),
+    Option(
+        "--input-fidelity|--input_fidelity|-input-fidelity|-input_fidelity",
+        Args["packy_input_fidelity", str],
+        help_text="Packy 图生图保真参数: high",
+    ),
+    Option(
+        "--compression|-compression",
+        Args["packy_output_compression", int],
+        help_text="Packy 输出压缩质量，范围 0-100，主要用于 jpeg",
+    ),
+    Option(
+        "--user|-user",
+        Args["packy_user", str],
+        help_text="Packy user 参数，用于终端用户标识",
+    ),
     Args[
         "prompt?",
         MultiVar(str | UniImage),
@@ -257,10 +404,15 @@ draw_alconna = Alconna(
     ],
     meta=CommandMeta(
         description="AI图片生成",
-        usage="draw <描述>\ndraw <描述> [图片] - 基于图片进行风格转换",
+        usage=(
+            "draw <描述>\n"
+            "draw <描述> [图片] - 基于图片进行风格转换\n"
+            "draw --engine packy -size <WxH|auto> -background <auto|opaque> <描述>"
+        ),
         example="""
             draw 一只可爱的小猫
             draw --engine api 未来都市
+            draw --engine packy -size 2560:1440 -background opaque 未来都市
             draw -o on [附带图片] 换成赛博朋克风格
             draw -t 手办 @用户
         """,

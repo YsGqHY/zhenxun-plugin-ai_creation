@@ -23,6 +23,7 @@ from . import DrawEngine
 MAX_RETRIES = 3              # 最大重试次数
 RETRY_DELAY_BASE = 5.0       # 重试基础延迟（秒）
 GEMINI_TIMEOUT = 1800        # Gemini 超时时间（30分钟 = 1800秒）
+OPENAI_SDK_TIMEOUT = 1200    # OpenAI SDK 超时时间（20分钟 = 1200秒）
 
 T = TypeVar("T")
 
@@ -45,6 +46,7 @@ def _is_retryable_error(error: Exception) -> bool:
         "502",
         "503",
         "504",
+        "524",
         "service unavailable",
         "internal server error",
         "bad gateway",
@@ -69,11 +71,18 @@ def _is_permanent_error(error: Exception) -> bool:
     """判断是否为永久性错误（不应重试）"""
     error_str = str(error).lower()
 
+    # 检查 OpenAI SDK 异常的 status_code 属性
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int) and status_code in (400, 401, 403, 404, 405, 422):
+        return True
+
     # 永久性错误
     permanent_patterns = [
+        "400",
         "401",
         "403",
         "404",
+        "bad request",
         "invalid api key",
         "unauthorized",
         "forbidden",
@@ -82,6 +91,7 @@ def _is_permanent_error(error: Exception) -> bool:
         "invalid model",
         "permission denied",
         "authentication",
+        "bad_response_status_code",
     ]
 
     for pattern in permanent_patterns:
@@ -173,7 +183,7 @@ def _get_image_info(image_data: bytes) -> dict[str, Any]:
 
 
 def _extract_image_from_content(content: str) -> bytes | None:
-    """从响应内容中提取图片数据"""
+    """从响应内容中提取图片数据（仅 base64）"""
     # 尝试提取 Base64 图片
     # 格式: data:image/png;base64,... 或 ![image](data:image/png;base64,...)
     match = re.search(r"data:image/(\w+);base64,([a-zA-Z0-9+/=]+)", content)
@@ -187,6 +197,23 @@ def _extract_image_from_content(content: str) -> bytes | None:
             return None
 
     return None
+
+
+def _extract_markdown_image_urls(content: str) -> list[str]:
+    """从 Markdown 内容中提取 HTTP(S) 图片 URL
+
+    匹配 ![...](https://...) 格式，排除 base64 data URI。
+    """
+    pattern = r"!\[.*?\]\((https?://[^\s\)]+)\)"
+    return re.findall(pattern, content)
+
+
+def _strip_markdown_images(content: str) -> str:
+    """移除 Markdown 图片标记，保留剩余文本"""
+    cleaned = re.sub(r"!\[.*?\]\(https?://[^\s\)]+\)", "", content)
+    # 合并多余空行
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 class LlmImageApiEngine(DrawEngine):
@@ -246,6 +273,7 @@ class LlmImageApiEngine(DrawEngine):
             self._client = AsyncOpenAI(
                 base_url=base_url,
                 api_key=api_key,
+                timeout=OPENAI_SDK_TIMEOUT,
                 default_headers={
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -780,15 +808,13 @@ class LlmImageApiEngine(DrawEngine):
             response_content = response.choices[0].message.content or ""
             logger.debug(f"[DirectAPI] 响应长度: {len(response_content)} 字符")
 
-            # 尝试提取图片
             images: list[bytes] = []
             text_content = ""
 
+            # 1) 尝试提取 base64 内联图片
             img_data = _extract_image_from_content(response_content)
             if img_data:
                 images.append(img_data)
-
-                # 记录图片信息
                 img_info = _get_image_info(img_data)
                 logger.info(
                     f"[DirectAPI] 图片生成成功: "
@@ -796,8 +822,42 @@ class LlmImageApiEngine(DrawEngine):
                     f"分辨率={img_info.get('resolution', '?')}, "
                     f"格式={img_info.get('format', '?')}"
                 )
-            else:
-                # 没有提取到图片，可能是纯文本回复
+
+            # 2) 尝试提取 Markdown 格式的图片 URL（如 Packy Chat Completions 返回）
+            if not images:
+                md_urls = _extract_markdown_image_urls(response_content)
+                if md_urls:
+                    logger.info(
+                        f"[DirectAPI] 检测到 {len(md_urls)} 个 Markdown 图片 URL，开始下载..."
+                    )
+                    async with httpx.AsyncClient(
+                        timeout=60, proxy=None
+                    ) as dl_client:
+                        for i, img_url in enumerate(md_urls):
+                            try:
+                                dl_resp = await dl_client.get(img_url)
+                                if dl_resp.status_code == 200:
+                                    images.append(dl_resp.content)
+                                    img_info = _get_image_info(dl_resp.content)
+                                    logger.info(
+                                        f"[DirectAPI] 图片 {i + 1} 下载成功: "
+                                        f"大小={img_info.get('size_kb', '?')}KB, "
+                                        f"分辨率={img_info.get('resolution', '?')}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[DirectAPI] 图片 {i + 1} 下载失败: "
+                                        f"HTTP {dl_resp.status_code}"
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[DirectAPI] 图片 {i + 1} 下载异常: {e}"
+                                )
+                    # 移除 Markdown 图片标记，保留剩余文本
+                    text_content = _strip_markdown_images(response_content)
+
+            # 3) 都没提取到，作为纯文本返回
+            if not images and not text_content:
                 text_content = response_content
                 logger.warning("[DirectAPI] 未能从响应中提取图片数据")
                 if response_content:

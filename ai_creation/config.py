@@ -193,6 +193,8 @@ DEFAULT_TEMPLATES = {
     ),
 }
 
+# Packy GPT-Image-2 支持 auto 或自定义 WxH 尺寸。
+# 具体尺寸约束在 engines/packy_image.py 中按分辨率计算。
 DOUBAO_SELECTORS = {
     "file_upload": [
         'input[type="file"]',
