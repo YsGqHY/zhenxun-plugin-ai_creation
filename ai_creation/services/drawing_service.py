@@ -826,11 +826,12 @@ class DrawingService:
             if text_content:
                 message_to_send.append(MessageSegment.text(f"📝 {text_content}\n"))
             message_to_send.append(MessageSegment.image(file=images_bytes[0]))
-            # 如果有 URL，附加到消息中
+            # 如果有 URL，附加到消息中，并在下一行提醒原请求用户。
             if image_urls:
                 message_to_send.append(
-                    MessageSegment.text(f"\n🔗 在线查看: {image_urls[0]}")
+                    MessageSegment.text(f"\n🔗 在线查看: {image_urls[0]}\n")
                 )
+                message_to_send.append(MessageSegment.at(self.ctx.user_id))
             await self.ctx.matcher.finish(Message(message_to_send))
             return
 
